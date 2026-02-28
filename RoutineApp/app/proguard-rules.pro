@@ -1,0 +1,3 @@
+-keep class com.routine.data.model.** { *; }
+-keepattributes Signature
+-keepattributes *Annotation*

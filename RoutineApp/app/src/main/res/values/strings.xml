@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Routine</string>
+    <string name="task_widget_description">Tap to log a task and build a smart routine</string>
+    <string name="note_widget_description">Tap to add notes with automatic time-based reminders</string>
+</resources>
