@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
@@ -73,6 +74,17 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/note_widget_info" />
         </receiver>
+
+        <!-- Notification action receivers -->
+        <receiver
+            android:name=".worker.ReminderDismissReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".worker.RoutineDoneReceiver"
+            android:exported="false" />
+        <receiver
+            android:name=".worker.RoutineSnoozeReceiver"
+            android:exported="false" />
 
         <!-- Geofence Broadcast Receiver -->
         <receiver

@@ -129,7 +129,7 @@ fun SettingsScreen(vm: SettingsViewModel = hiltViewModel()) {
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        "Routines escalate: Missed a routine? Notifications get progressively louder the more overdue you are.",
+                        "Gentle nudges: When a routine is overdue you get one reminder around your usual time, then a spaced-out follow-up or two — never hourly nagging, and never at night (22:00–08:00). Mark it done or snooze it right from the notification.",
                         style = MaterialTheme.typography.bodySmall
                     )
                 }

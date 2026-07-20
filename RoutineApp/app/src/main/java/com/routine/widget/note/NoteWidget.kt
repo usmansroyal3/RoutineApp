@@ -11,11 +11,11 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.glance.*
@@ -25,11 +25,12 @@ import androidx.glance.appwidget.*
 import androidx.glance.appwidget.action.ActionCallback
 import androidx.glance.appwidget.action.actionRunCallback
 import androidx.glance.appwidget.state.updateAppWidgetState
+import androidx.glance.color.ColorProvider
 import androidx.glance.layout.*
 import androidx.glance.state.PreferencesGlanceStateDefinition
+import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
-import androidx.glance.unit.ColorProvider
 import com.routine.data.model.Note
 import com.routine.data.model.Reminder
 import com.routine.domain.NoteParser
@@ -63,11 +64,24 @@ class NoteWidget : GlanceAppWidget() {
         val preview = prefs[stringPreferencesKey("note_preview")] ?: "Tap to add notes + reminders"
         val hasReminders = prefs[booleanPreferencesKey("has_reminders")] ?: false
 
+        val background = ColorProvider(
+            day = androidx.compose.ui.graphics.Color(0xFFFDF6E5),
+            night = androidx.compose.ui.graphics.Color(0xFF201D15)
+        )
+        val titleColor = ColorProvider(
+            day = androidx.compose.ui.graphics.Color(0xFF875200),
+            night = androidx.compose.ui.graphics.Color(0xFFFFB868)
+        )
+        val bodyColor = ColorProvider(
+            day = androidx.compose.ui.graphics.Color(0xFF4A4438),
+            night = androidx.compose.ui.graphics.Color(0xFFD9D3C4)
+        )
+
         Box(
             modifier = GlanceModifier
                 .fillMaxSize()
-                .background(ColorProvider(android.graphics.Color.parseColor("#FFF8E1")))
-                .cornerRadius(16)
+                .background(background)
+                .cornerRadius(20.dp)
                 .padding(12.dp)
                 .clickable(actionRunCallback<OpenNoteAction>())
         ) {
@@ -75,21 +89,22 @@ class NoteWidget : GlanceAppWidget() {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = "📝",
-                        style = TextStyle(fontSize = androidx.glance.unit.Sp(16f))
+                        style = TextStyle(fontSize = 16.sp)
                     )
                     Spacer(GlanceModifier.width(6.dp))
                     Text(
                         text = "Notes",
                         style = TextStyle(
-                            fontSize = androidx.glance.unit.Sp(13f),
-                            color = ColorProvider(android.graphics.Color.parseColor("#F57F17"))
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = titleColor
                         )
                     )
                     if (hasReminders) {
                         Spacer(GlanceModifier.width(4.dp))
                         Text(
                             text = "⏰",
-                            style = TextStyle(fontSize = androidx.glance.unit.Sp(12f))
+                            style = TextStyle(fontSize = 12.sp)
                         )
                     }
                 }
@@ -97,8 +112,8 @@ class NoteWidget : GlanceAppWidget() {
                 Text(
                     text = preview,
                     style = TextStyle(
-                        fontSize = androidx.glance.unit.Sp(12f),
-                        color = ColorProvider(android.graphics.Color.parseColor("#5D4037"))
+                        fontSize = 12.sp,
+                        color = bodyColor
                     ),
                     maxLines = 4
                 )

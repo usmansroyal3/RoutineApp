@@ -20,9 +20,14 @@ import com.routine.data.repository.TaskRepository
 import com.routine.domain.PatternAnalyzer
 import com.routine.domain.ReminderScheduler
 import com.routine.ui.MainActivity
+import com.routine.widget.task.TaskWidgetUpdateService
 import dagger.assisted.Assisted
 import dagger.assisted.AssistedInject
 import dagger.hilt.android.AndroidEntryPoint
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import java.util.Calendar
 import java.util.concurrent.TimeUnit
 import javax.inject.Inject
 
@@ -81,11 +86,12 @@ class PatternAnalysisWorker @AssistedInject constructor(
         )
 
         // Notify the user that a routine has been proposed
-        postRoutineProposalNotification(taskId)
+        val task = taskRepository.getTask(taskId)
+        postRoutineProposalNotification(taskId, task?.name, task?.emoji)
         return Result.success()
     }
 
-    private fun postRoutineProposalNotification(taskId: Long) {
+    private fun postRoutineProposalNotification(taskId: Long, taskName: String?, emoji: String?) {
         val intent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("open_tab", "routines")
@@ -94,9 +100,11 @@ class PatternAnalysisWorker @AssistedInject constructor(
             applicationContext, 0, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val title = if (taskName != null) "Found a rhythm for ${taskName} ${emoji ?: ""}".trim()
+        else "Routine detected 🎯"
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ROUTINE)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Routine detected 🎯")
+            .setContentTitle(title)
             .setContentText("Tap to review and confirm your new routine")
             .setContentIntent(pi)
             .setAutoCancel(true)
@@ -165,8 +173,11 @@ class ReminderFireWorker @AssistedInject constructor(
 }
 
 // ─── Routine Check Worker ────────────────────────────────────────────────────
-// Runs periodically (every hour). Checks if any active routine is overdue
-// and sends an escalating notification.
+// Runs periodically (every hour) but nudges sparingly:
+//  - never during quiet hours (22:00–08:00)
+//  - the first nudge waits for the hour you usually do the task
+//  - after a nudge, stays silent for a cooldown period instead of re-firing
+//    every hour (the old behavior that made notifications feel spammy)
 
 @HiltWorker
 class RoutineCheckWorker @AssistedInject constructor(
@@ -177,6 +188,9 @@ class RoutineCheckWorker @AssistedInject constructor(
 ) : CoroutineWorker(context, workerParams) {
 
     companion object {
+        const val QUIET_HOUR_START = 22
+        const val QUIET_HOUR_END = 8
+
         fun scheduleRepeating(context: Context) {
             val request = PeriodicWorkRequestBuilder<RoutineCheckWorker>(1, TimeUnit.HOURS)
                 .build()
@@ -189,8 +203,12 @@ class RoutineCheckWorker @AssistedInject constructor(
     }
 
     override suspend fun doWork(): Result {
-        val active = routineRepository.getActiveRoutines()
         val now = System.currentTimeMillis()
+        val hourOfDay = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+
+        if (hourOfDay >= QUIET_HOUR_START || hourOfDay < QUIET_HOUR_END) return Result.success()
+
+        val active = routineRepository.getActiveRoutines()
 
         active.forEach { routine ->
             // Skip if snoozed
@@ -210,8 +228,25 @@ class RoutineCheckWorker @AssistedInject constructor(
                 else -> 0                         // just overdue
             }
 
+            // Cooldown: if we already nudged for this cycle, wait before nudging
+            // again. Very overdue tasks back off further to twice a day at most.
+            val lastReminded = routine.lastRemindedAt
+            if (lastReminded != null && lastReminded > lastLog.timestamp) {
+                val hoursSinceReminder = (now - lastReminded) / 3_600_000
+                val cooldownHours =
+                    if (level >= 2) 48L
+                    else (interval / 2L).coerceIn(8L, 24L)
+                if (hoursSinceReminder < cooldownHours) return@forEach
+            }
+
+            // First nudge waits for the time of day the user usually does the task
+            if (level == 0) {
+                val preferred = routine.preferredHourOfDay
+                if (preferred != null && hourOfDay < preferred) return@forEach
+            }
+
             val task = taskRepository.getTask(routine.taskId) ?: return@forEach
-            postOverdueNotification(task.name, task.emoji, routine, level)
+            postOverdueNotification(task.id, task.name, task.emoji, routine, level, interval.toLong(), hoursSince)
             routineRepository.markReminded(routine.id)
         }
 
@@ -219,16 +254,26 @@ class RoutineCheckWorker @AssistedInject constructor(
     }
 
     private fun postOverdueNotification(
+        taskId: Long,
         taskName: String,
         emoji: String,
         routine: Routine,
-        level: Int
+        level: Int,
+        intervalHours: Long,
+        hoursSince: Long
     ) {
-        val messages = listOf(
-            "Time to $taskName $emoji",
-            "Don't forget — $taskName $emoji",
-            "⚠️ $taskName is overdue! $emoji"
-        )
+        val notificationId = NOTIF_OVERDUE + routine.id.toInt()
+        val title = when (level) {
+            0 -> "$emoji Time for $taskName"
+            1 -> "$emoji Still pending: $taskName"
+            else -> "$emoji $taskName is overdue"
+        }
+        val body = when (level) {
+            0 -> "You usually do this ${everyText(intervalHours)} — it's been ${spanText(hoursSince)}."
+            1 -> "It's been ${spanText(hoursSince)}, a bit longer than your usual ${cadenceText(intervalHours)}."
+            else -> "It's been ${spanText(hoursSince)}. You usually do this ${everyText(intervalHours)}."
+        }
+
         val intent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
@@ -237,17 +282,61 @@ class RoutineCheckWorker @AssistedInject constructor(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val doneIntent = Intent(applicationContext, RoutineDoneReceiver::class.java).apply {
+            putExtra("task_id", taskId)
+            putExtra("notification_id", notificationId)
+        }
+        val donePi = PendingIntent.getBroadcast(
+            applicationContext, notificationId, doneIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val snoozeIntent = Intent(applicationContext, RoutineSnoozeReceiver::class.java).apply {
+            putExtra("routine_id", routine.id)
+            putExtra("notification_id", notificationId)
+        }
+        val snoozePi = PendingIntent.getBroadcast(
+            applicationContext, notificationId + 1, snoozeIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ROUTINE)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle(messages[level])
-            .setContentText("Tap the widget when done ✓")
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(pi)
+            .addAction(0, "Done ✓", donePi)
+            .addAction(0, "Snooze 1 day", snoozePi)
             .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
             .setPriority(if (level >= 2) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
             .build()
 
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.notify(NOTIF_OVERDUE + routine.id.toInt(), notification)
+        nm.notify(notificationId, notification)
+    }
+
+    // "it's been 5 days" / "it's been 18 hours"
+    private fun spanText(hours: Long): String = when {
+        hours < 2 -> "about an hour"
+        hours < 24 -> "$hours hours"
+        hours < 48 -> "a day"
+        else -> "${hours / 24} days"
+    }
+
+    // "every 6 hours" / "daily" / "every 4 days"
+    private fun everyText(hours: Long): String = when {
+        hours < 24 -> "every $hours hours"
+        hours < 48 -> "daily"
+        else -> "every ${hours / 24} days"
+    }
+
+    // "6-hour rhythm" / "daily rhythm" / "4-day rhythm"
+    private fun cadenceText(hours: Long): String = when {
+        hours < 24 -> "$hours-hour rhythm"
+        hours < 48 -> "daily rhythm"
+        else -> "${hours / 24}-day rhythm"
     }
 }
 
@@ -286,11 +375,69 @@ class ReminderDismissReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         val reminderId = intent.getLongExtra("reminder_id", -1L)
         if (reminderId == -1L) return
-        // Fire and forget on main thread via coroutine — use goAsync for production
         val pending = goAsync()
-        kotlinx.coroutines.GlobalScope.kotlinx.coroutines.launch {
-            noteRepository.markReminderDismissed(reminderId)
-            pending.finish()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                noteRepository.markReminderDismissed(reminderId)
+            } finally {
+                pending.finish()
+            }
+        }
+    }
+}
+
+// ─── Routine "Done" Receiver ─────────────────────────────────────────────────
+// "Done ✓" on an overdue notification logs the task just like tapping the
+// widget would, then refreshes the widget so it shows "Just now".
+
+@AndroidEntryPoint
+class RoutineDoneReceiver : BroadcastReceiver() {
+
+    @Inject lateinit var taskRepository: TaskRepository
+
+    override fun onReceive(context: Context, intent: Intent) {
+        val taskId = intent.getLongExtra("task_id", -1L)
+        val notificationId = intent.getIntExtra("notification_id", -1)
+        if (taskId == -1L) return
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                taskRepository.logTask(taskId, null, null, null)
+                TaskWidgetUpdateService.refreshTask(context, taskId)
+            } finally {
+                if (notificationId != -1) {
+                    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    nm.cancel(notificationId)
+                }
+                pending.finish()
+            }
+        }
+    }
+}
+
+// ─── Routine Snooze Receiver ─────────────────────────────────────────────────
+// Pauses reminders for the routine for 24h without deactivating it.
+
+@AndroidEntryPoint
+class RoutineSnoozeReceiver : BroadcastReceiver() {
+
+    @Inject lateinit var routineRepository: RoutineRepository
+
+    override fun onReceive(context: Context, intent: Intent) {
+        val routineId = intent.getLongExtra("routine_id", -1L)
+        val notificationId = intent.getIntExtra("notification_id", -1)
+        if (routineId == -1L) return
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                routineRepository.snoozeKeepActive(routineId, System.currentTimeMillis() + 24 * 3_600_000L)
+            } finally {
+                if (notificationId != -1) {
+                    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    nm.cancel(notificationId)
+                }
+                pending.finish()
+            }
         }
     }
 }
