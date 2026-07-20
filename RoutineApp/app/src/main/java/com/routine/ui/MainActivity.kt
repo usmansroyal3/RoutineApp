@@ -6,11 +6,15 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.outlined.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.routine.ui.home.HomeScreen
 import com.routine.ui.note.NotesScreen
@@ -36,7 +40,13 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+private data class NavItem(
+    val route: String,
+    val label: String,
+    val selectedIcon: ImageVector,
+    val unselectedIcon: ImageVector
+)
+
 @Composable
 fun MainScreen(initialTab: String? = null, openNoteId: Long = -1L) {
     val navController = rememberNavController()
@@ -46,27 +56,41 @@ fun MainScreen(initialTab: String? = null, openNoteId: Long = -1L) {
         else -> "home"
     }
 
+    val items = listOf(
+        NavItem("home", "Routines", Icons.Filled.Home, Icons.Outlined.Home),
+        NavItem("notes", "Notes", Icons.Filled.Edit, Icons.Outlined.Edit),
+        NavItem("settings", "Settings", Icons.Filled.Settings, Icons.Outlined.Settings)
+    )
+
+    val backStackEntry by navController.currentBackStackEntryAsState()
+    val currentRoute = backStackEntry?.destination?.route
+
     Scaffold(
+        containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             NavigationBar {
-                NavigationBarItem(
-                    selected = true,
-                    onClick = { navController.navigate("home") },
-                    icon = { Icon(Icons.Default.Home, contentDescription = null) },
-                    label = { Text("Tasks") }
-                )
-                NavigationBarItem(
-                    selected = false,
-                    onClick = { navController.navigate("notes") },
-                    icon = { Icon(Icons.Default.Edit, contentDescription = null) },
-                    label = { Text("Notes") }
-                )
-                NavigationBarItem(
-                    selected = false,
-                    onClick = { navController.navigate("settings") },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = null) },
-                    label = { Text("Settings") }
-                )
+                items.forEach { item ->
+                    val selected = currentRoute == item.route
+                    NavigationBarItem(
+                        selected = selected,
+                        onClick = {
+                            navController.navigate(item.route) {
+                                popUpTo(navController.graph.findStartDestination().id) {
+                                    saveState = true
+                                }
+                                launchSingleTop = true
+                                restoreState = true
+                            }
+                        },
+                        icon = {
+                            Icon(
+                                if (selected) item.selectedIcon else item.unselectedIcon,
+                                contentDescription = item.label
+                            )
+                        },
+                        label = { Text(item.label) }
+                    )
+                }
             }
         }
     ) { padding ->

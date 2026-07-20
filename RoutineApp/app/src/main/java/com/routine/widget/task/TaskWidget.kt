@@ -11,6 +11,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.glance.*
 import androidx.glance.action.ActionParameters
 import androidx.glance.action.clickable
@@ -18,21 +19,47 @@ import androidx.glance.appwidget.*
 import androidx.glance.appwidget.action.ActionCallback
 import androidx.glance.appwidget.action.actionRunCallback
 import androidx.glance.appwidget.state.updateAppWidgetState
+import androidx.glance.color.ColorProvider
 import androidx.glance.layout.*
+import androidx.glance.layout.Alignment
 import androidx.glance.state.GlanceStateDefinition
 import androidx.glance.state.PreferencesGlanceStateDefinition
+import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
-import androidx.glance.unit.ColorProvider
 import androidx.datastore.preferences.core.*
 import com.routine.data.repository.TaskRepository
-import com.routine.ui.theme.GreenPrimary
 import com.routine.worker.PatternAnalysisWorker
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import javax.inject.Inject
+
+// ─── Widget palette (day / night aware) ──────────────────────────────────────
+
+private object WidgetPalette {
+    val background = ColorProvider(
+        day = androidx.compose.ui.graphics.Color(0xFFF1F7EC),
+        night = androidx.compose.ui.graphics.Color(0xFF1A1F19)
+    )
+    val backgroundOverdue = ColorProvider(
+        day = androidx.compose.ui.graphics.Color(0xFFFDEDE9),
+        night = androidx.compose.ui.graphics.Color(0xFF2B1D18)
+    )
+    val title = ColorProvider(
+        day = androidx.compose.ui.graphics.Color(0xFF1B1F1A),
+        night = androidx.compose.ui.graphics.Color(0xFFE6EAE1)
+    )
+    val accent = ColorProvider(
+        day = androidx.compose.ui.graphics.Color(0xFF2E7D32),
+        night = androidx.compose.ui.graphics.Color(0xFFA5D6A7)
+    )
+    val accentOverdue = ColorProvider(
+        day = androidx.compose.ui.graphics.Color(0xFFBA1A1A),
+        night = androidx.compose.ui.graphics.Color(0xFFFFB4AB)
+    )
+}
 
 // ─── Widget Provider ─────────────────────────────────────────────────────────
 
@@ -61,40 +88,36 @@ class TaskWidget : GlanceAppWidget() {
             modifier = GlanceModifier
                 .fillMaxSize()
                 .background(
-                    if (isOverdue)
-                        ColorProvider(android.graphics.Color.parseColor("#FFF3E0"))
-                    else
-                        ColorProvider(android.graphics.Color.parseColor("#F1F8E9"))
+                    if (isOverdue) WidgetPalette.backgroundOverdue
+                    else WidgetPalette.background
                 )
-                .cornerRadius(16)
+                .cornerRadius(20.dp)
                 .padding(12.dp)
-                .clickable(actionRunCallback<TaskLogAction>())
+                .clickable(actionRunCallback<TaskLogAction>()),
+            contentAlignment = Alignment.Center
         ) {
-            Column(
-                modifier = GlanceModifier.fillMaxSize(),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = emoji,
-                    style = TextStyle(fontSize = androidx.glance.unit.Sp(28f))
+                    style = TextStyle(fontSize = 26.sp)
                 )
                 Spacer(modifier = GlanceModifier.height(4.dp))
                 Text(
                     text = taskName,
                     style = TextStyle(
-                        fontSize = androidx.glance.unit.Sp(14f),
-                        color = ColorProvider(android.graphics.Color.parseColor("#1B5E20"))
-                    )
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = WidgetPalette.title
+                    ),
+                    maxLines = 1
                 )
                 Spacer(modifier = GlanceModifier.height(2.dp))
                 Text(
-                    text = if (isOverdue) "⚠️ $lastDoneText" else lastDoneText,
+                    text = if (isOverdue) "● due · $lastDoneText" else "✓ $lastDoneText",
                     style = TextStyle(
-                        fontSize = androidx.glance.unit.Sp(11f),
-                        color = ColorProvider(
-                            if (isOverdue) android.graphics.Color.parseColor("#E65100")
-                            else android.graphics.Color.parseColor("#558B2F")
-                        )
+                        fontSize = 11.sp,
+                        color = if (isOverdue) WidgetPalette.accentOverdue
+                        else WidgetPalette.accent
                     )
                 )
             }
@@ -110,11 +133,9 @@ class TaskLogAction : ActionCallback {
         glanceId: GlanceId,
         parameters: ActionParameters
     ) {
-        // Get task ID from widget prefs, log the action, trigger pattern analysis
-        val prefs = GlanceAppWidgetManager(context).getAppWidgetId(glanceId)
-        // Delegate to a coroutine scope
+        val appWidgetId = GlanceAppWidgetManager(context).getAppWidgetId(glanceId)
         CoroutineScope(Dispatchers.IO).launch {
-            TaskWidgetUpdateService.logAndUpdate(context, glanceId, prefs)
+            TaskWidgetUpdateService.logAndUpdate(context, appWidgetId)
         }
     }
 }
@@ -143,24 +164,26 @@ class TaskWidgetConfigActivity : ComponentActivity() {
         }
 
         setContent {
-            MaterialTheme {
-                TaskWidgetConfigScreen(
-                    onConfirm = { name, emoji ->
-                        CoroutineScope(Dispatchers.IO).launch {
-                            val taskId = taskRepository.createTask(name, emoji)
-                            taskRepository.assignWidget(taskId, appWidgetId)
-                            TaskWidgetUpdateService.updateWidgetState(
-                                this@TaskWidgetConfigActivity, appWidgetId, name, emoji, "Never", false
-                            )
-                        }
-                        val result = Intent().apply {
-                            putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
-                        }
-                        setResult(RESULT_OK, result)
-                        finish()
-                    },
-                    onCancel = { finish() }
-                )
+            com.routine.ui.theme.AppTheme {
+                Surface {
+                    TaskWidgetConfigScreen(
+                        onConfirm = { name, emoji ->
+                            CoroutineScope(Dispatchers.IO).launch {
+                                val taskId = taskRepository.createTask(name, emoji)
+                                taskRepository.assignWidget(taskId, appWidgetId)
+                                TaskWidgetUpdateService.updateWidgetState(
+                                    this@TaskWidgetConfigActivity, appWidgetId, name, emoji, "Never", false
+                                )
+                            }
+                            val result = Intent().apply {
+                                putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
+                            }
+                            setResult(RESULT_OK, result)
+                            finish()
+                        },
+                        onCancel = { finish() }
+                    )
+                }
             }
         }
     }
@@ -217,7 +240,7 @@ fun FlowRow(emojis: List<String>, selected: String, onSelect: (String) -> Unit) 
 
 object TaskWidgetUpdateService {
 
-    suspend fun logAndUpdate(context: Context, glanceId: GlanceId, appWidgetId: Int) {
+    suspend fun logAndUpdate(context: Context, appWidgetId: Int) {
         // This is called from the widget action — uses Hilt entry points for repo access
         val entryPoint = com.routine.di.RepositoryEntryPoint.get(context)
         val taskRepo = entryPoint.taskRepository()
@@ -232,7 +255,16 @@ object TaskWidgetUpdateService {
             PatternAnalysisWorker.enqueue(context, task.id)
         }
 
-        // Update widget display state
+        refreshTask(context, task.id)
+    }
+
+    /** Recompute a task's display state and push it to its widget, if any. */
+    suspend fun refreshTask(context: Context, taskId: Long) {
+        val entryPoint = com.routine.di.RepositoryEntryPoint.get(context)
+        val taskRepo = entryPoint.taskRepository()
+        val task = taskRepo.getTask(taskId) ?: return
+        if (task.widgetId == -1) return
+
         val lastLog = taskRepo.getLastLog(task.id)
         val routine = entryPoint.routineRepository().getForTask(task.id)
         val hoursSince = lastLog?.let { (System.currentTimeMillis() - it.timestamp) / 3_600_000 }
@@ -249,8 +281,7 @@ object TaskWidgetUpdateService {
             else -> "${hoursSince / 24}d ago"
         }
 
-        updateWidgetState(context, appWidgetId, task.name, task.emoji, lastDoneText, isOverdue)
-        TaskWidget().update(context, glanceId)
+        updateWidgetState(context, task.widgetId, task.name, task.emoji, lastDoneText, isOverdue)
     }
 
     suspend fun updateWidgetState(
@@ -261,9 +292,10 @@ object TaskWidgetUpdateService {
         lastDone: String,
         isOverdue: Boolean
     ) {
-        val glanceId = GlanceAppWidgetManager(context)
+        val manager = GlanceAppWidgetManager(context)
+        val glanceId = manager
             .getGlanceIds(TaskWidget::class.java)
-            .firstOrNull { GlanceAppWidgetManager(context).getAppWidgetId(it) == appWidgetId }
+            .firstOrNull { manager.getAppWidgetId(it) == appWidgetId }
             ?: return
 
         updateAppWidgetState(context, PreferencesGlanceStateDefinition, glanceId) { prefs ->
@@ -274,5 +306,6 @@ object TaskWidgetUpdateService {
                 this[booleanPreferencesKey("is_overdue")] = isOverdue
             }
         }
+        TaskWidget().update(context, glanceId)
     }
 }

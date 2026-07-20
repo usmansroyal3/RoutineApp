@@ -81,6 +81,9 @@ interface RoutineDao {
     @Query("UPDATE routines SET snoozeUntil = :until, status = 'SNOOZED' WHERE id = :id")
     suspend fun snooze(id: Long, until: Long)
 
+    @Query("UPDATE routines SET snoozeUntil = :until WHERE id = :id")
+    suspend fun setSnoozeUntil(id: Long, until: Long)
+
     @Query("SELECT * FROM routines")
     fun observeAll(): Flow<List<Routine>>
 }

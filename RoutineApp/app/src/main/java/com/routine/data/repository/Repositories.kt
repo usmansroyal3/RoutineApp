@@ -89,6 +89,10 @@ class RoutineRepository @Inject constructor(
     suspend fun snooze(routineId: Long, untilMillis: Long) =
         routineDao.snooze(routineId, untilMillis)
 
+    // Pause reminders without changing the routine's ACTIVE status
+    suspend fun snoozeKeepActive(routineId: Long, untilMillis: Long) =
+        routineDao.setSnoozeUntil(routineId, untilMillis)
+
     suspend fun update(routine: Routine) = routineDao.update(routine)
 
     suspend fun getActiveRoutines(): List<Routine> = routineDao.getActiveRoutines()
