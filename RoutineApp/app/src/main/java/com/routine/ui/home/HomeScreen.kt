@@ -19,10 +19,12 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.routine.data.model.*
 import com.routine.data.repository.RoutineRepository
 import com.routine.data.repository.TaskRepository
+import com.routine.domain.RelativeTimeFormatter
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
@@ -66,11 +68,15 @@ class HomeViewModel @Inject constructor(
 
 @Composable
 fun HomeScreen(vm: HomeViewModel = hiltViewModel()) {
-    val tasks by vm.tasksWithState.collectAsState()
-    val proposed by vm.proposedRoutines.collectAsState()
+    val tasks by vm.tasksWithState.collectAsStateWithLifecycle()
+    val proposed by vm.proposedRoutines.collectAsStateWithLifecycle()
 
     if (tasks.isEmpty() && proposed.isEmpty()) {
-        Column(modifier = Modifier.fillMaxSize()) {
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+        ) {
             ScreenHeader()
             EmptyState(modifier = Modifier.weight(1f))
         }
@@ -158,7 +164,7 @@ fun RoutineProposalCard(
                 Spacer(Modifier.width(12.dp))
                 Column {
                     Text(
-                        "Routine detected: ${task?.name ?: "Task"}",
+                        "Pattern detected: ${task?.name ?: "Task"}",
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.Bold,
                         color = MaterialTheme.colorScheme.onPrimaryContainer
@@ -170,6 +176,12 @@ fun RoutineProposalCard(
                     )
                 }
             }
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Enable reminders for this pattern?",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer
+            )
             Spacer(Modifier.height(10.dp))
             ConfidenceBar(routine.confidence)
             Spacer(Modifier.height(14.dp))
@@ -181,7 +193,7 @@ fun RoutineProposalCard(
                     Text("Later")
                 }
                 Button(onClick = onActivate, modifier = Modifier.weight(1.2f)) {
-                    Text("Set routine")
+                    Text("Enable")
                 }
             }
         }
@@ -277,7 +289,7 @@ fun TaskCard(state: TaskWithLastLog, onDelete: () -> Unit) {
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            buildLastDoneText(state.hoursSinceLastDone),
+                            RelativeTimeFormatter.format(state.lastLog?.timestamp),
                             style = MaterialTheme.typography.bodySmall,
                             color = if (isOverdue) MaterialTheme.colorScheme.error
                             else MaterialTheme.colorScheme.onSurfaceVariant
@@ -395,12 +407,4 @@ private fun buildIntervalText(hours: Int): String = when {
     hours < 24 -> "Every ${hours}h"
     hours < 48 -> "Daily"
     else -> "Every ${hours / 24} days"
-}
-
-private fun buildLastDoneText(hoursSince: Long?): String = when {
-    hoursSince == null -> "Never done"
-    hoursSince < 1 -> "Just now"
-    hoursSince < 24 -> "${hoursSince}h ago"
-    hoursSince < 48 -> "Yesterday"
-    else -> "${hoursSince / 24} days ago"
 }

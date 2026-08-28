@@ -18,7 +18,8 @@ import com.routine.data.repository.NoteRepository
 import com.routine.data.repository.RoutineRepository
 import com.routine.data.repository.TaskRepository
 import com.routine.domain.PatternAnalyzer
-import com.routine.domain.ReminderScheduler
+import com.routine.domain.NotificationPermission
+import com.routine.domain.RoutineReminderPolicy
 import com.routine.ui.MainActivity
 import com.routine.widget.task.TaskWidgetUpdateService
 import dagger.assisted.Assisted
@@ -46,6 +47,7 @@ class PatternAnalysisWorker @AssistedInject constructor(
 
     companion object {
         const val KEY_TASK_ID = "task_id"
+        private const val DISMISSED_PROPOSAL_COOLDOWN = 30L * 24 * 3_600_000L
 
         fun enqueue(context: Context, taskId: Long) {
             val data = workDataOf(KEY_TASK_ID to taskId)
@@ -67,9 +69,14 @@ class PatternAnalysisWorker @AssistedInject constructor(
 
         if (!patternAnalyzer.shouldPropose(result)) return Result.success()
 
-        // Only insert a new proposed routine if none exists or current is dismissed
+        // Do not repeatedly ask after a decision. A dismissed pattern may be
+        // reconsidered after a month of new behavior, but never on every tap.
         val existing = routineRepository.getForTask(taskId)
-        if (existing != null && existing.status != RoutineStatus.DISMISSED) return Result.success()
+        if (existing != null) {
+            val recentlyDismissed = existing.status == RoutineStatus.DISMISSED &&
+                System.currentTimeMillis() - existing.createdAt < DISMISSED_PROPOSAL_COOLDOWN
+            if (existing.status != RoutineStatus.DISMISSED || recentlyDismissed) return Result.success()
+        }
 
         routineRepository.insert(
             Routine(
@@ -92,6 +99,8 @@ class PatternAnalysisWorker @AssistedInject constructor(
     }
 
     private fun postRoutineProposalNotification(taskId: Long, taskName: String?, emoji: String?) {
+        if (!NotificationPermission.canPost(applicationContext)) return
+
         val intent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
             putExtra("open_tab", "routines")
@@ -135,6 +144,8 @@ class ReminderFireWorker @AssistedInject constructor(
         val reminderId = inputData.getLong(KEY_REMINDER_ID, -1L)
         val taskDescription = inputData.getString(KEY_TASK_DESCRIPTION) ?: return Result.failure()
         val noteId = inputData.getLong(KEY_NOTE_ID, -1L)
+
+        if (!NotificationPermission.canPost(applicationContext)) return Result.success()
 
         noteRepository.markReminderFired(reminderId)
 
@@ -188,9 +199,6 @@ class RoutineCheckWorker @AssistedInject constructor(
 ) : CoroutineWorker(context, workerParams) {
 
     companion object {
-        const val QUIET_HOUR_START = 22
-        const val QUIET_HOUR_END = 8
-
         fun scheduleRepeating(context: Context) {
             val request = PeriodicWorkRequestBuilder<RoutineCheckWorker>(1, TimeUnit.HOURS)
                 .build()
@@ -206,7 +214,8 @@ class RoutineCheckWorker @AssistedInject constructor(
         val now = System.currentTimeMillis()
         val hourOfDay = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
 
-        if (hourOfDay >= QUIET_HOUR_START || hourOfDay < QUIET_HOUR_END) return Result.success()
+        if (RoutineReminderPolicy.isQuietHour(hourOfDay)) return Result.success()
+        if (!NotificationPermission.canPost(applicationContext)) return Result.success()
 
         val active = routineRepository.getActiveRoutines()
 
@@ -233,9 +242,7 @@ class RoutineCheckWorker @AssistedInject constructor(
             val lastReminded = routine.lastRemindedAt
             if (lastReminded != null && lastReminded > lastLog.timestamp) {
                 val hoursSinceReminder = (now - lastReminded) / 3_600_000
-                val cooldownHours =
-                    if (level >= 2) 48L
-                    else (interval / 2L).coerceIn(8L, 24L)
+                val cooldownHours = RoutineReminderPolicy.cooldownHours(interval.toLong(), level)
                 if (hoursSinceReminder < cooldownHours) return@forEach
             }
 
@@ -246,8 +253,9 @@ class RoutineCheckWorker @AssistedInject constructor(
             }
 
             val task = taskRepository.getTask(routine.taskId) ?: return@forEach
-            postOverdueNotification(task.id, task.name, task.emoji, routine, level, interval.toLong(), hoursSince)
-            routineRepository.markReminded(routine.id)
+            if (postOverdueNotification(task.id, task.name, task.emoji, routine, interval.toLong())) {
+                routineRepository.markReminded(routine.id)
+            }
         }
 
         return Result.success()
@@ -258,21 +266,13 @@ class RoutineCheckWorker @AssistedInject constructor(
         taskName: String,
         emoji: String,
         routine: Routine,
-        level: Int,
-        intervalHours: Long,
-        hoursSince: Long
-    ) {
+        intervalHours: Long
+    ): Boolean {
         val notificationId = NOTIF_OVERDUE + routine.id.toInt()
-        val title = when (level) {
-            0 -> "$emoji Time for $taskName"
-            1 -> "$emoji Still pending: $taskName"
-            else -> "$emoji $taskName is overdue"
-        }
-        val body = when (level) {
-            0 -> "You usually do this ${everyText(intervalHours)} — it's been ${spanText(hoursSince)}."
-            1 -> "It's been ${spanText(hoursSince)}, a bit longer than your usual ${cadenceText(intervalHours)}."
-            else -> "It's been ${spanText(hoursSince)}. You usually do this ${everyText(intervalHours)}."
-        }
+        val title = "$emoji $taskName"
+        val actionText = taskName.trim().trimEnd('.', '!', '?')
+            .replaceFirstChar { it.lowercase() }
+        val body = "You usually $actionText ${everyText(intervalHours)}. Would you like to do it now?"
 
         val intent = Intent(applicationContext, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -300,43 +300,40 @@ class RoutineCheckWorker @AssistedInject constructor(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
+        val skipIntent = Intent(applicationContext, RoutineSkipTodayReceiver::class.java).apply {
+            putExtra("routine_id", routine.id)
+            putExtra("notification_id", notificationId)
+        }
+        val skipPi = PendingIntent.getBroadcast(
+            applicationContext, notificationId + 2, skipIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ROUTINE)
             .setSmallIcon(R.drawable.ic_notification)
             .setContentTitle(title)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(pi)
-            .addAction(0, "Done ✓", donePi)
-            .addAction(0, "Snooze 1 day", snoozePi)
+            .addAction(0, "Done", donePi)
+            .addAction(0, "Snooze", snoozePi)
+            .addAction(0, "Skip today", skipPi)
             .setAutoCancel(true)
             .setOnlyAlertOnce(true)
-            .setPriority(if (level >= 2) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .build()
 
         val nm = applicationContext.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         nm.notify(notificationId, notification)
+        return true
     }
 
-    // "it's been 5 days" / "it's been 18 hours"
-    private fun spanText(hours: Long): String = when {
-        hours < 2 -> "about an hour"
-        hours < 24 -> "$hours hours"
-        hours < 48 -> "a day"
-        else -> "${hours / 24} days"
-    }
-
-    // "every 6 hours" / "daily" / "every 4 days"
+    // "every 6 hours" / "every day" / "every 4 days"
     private fun everyText(hours: Long): String = when {
+        hours <= 1 -> "every hour"
         hours < 24 -> "every $hours hours"
-        hours < 48 -> "daily"
+        hours < 48 -> "every day"
         else -> "every ${hours / 24} days"
-    }
-
-    // "6-hour rhythm" / "daily rhythm" / "4-day rhythm"
-    private fun cadenceText(hours: Long): String = when {
-        hours < 24 -> "$hours-hour rhythm"
-        hours < 48 -> "daily rhythm"
-        else -> "${hours / 24}-day rhythm"
     }
 }
 
@@ -344,10 +341,6 @@ class RoutineCheckWorker @AssistedInject constructor(
 
 @AndroidEntryPoint
 class GeofenceBroadcastReceiver : BroadcastReceiver() {
-
-    @Inject lateinit var routineRepository: RoutineRepository
-    @Inject lateinit var taskRepository: TaskRepository
-
     override fun onReceive(context: Context, intent: Intent) {
         val event = GeofencingEvent.fromIntent(intent) ?: return
         if (event.hasError()) {
@@ -392,9 +385,6 @@ class ReminderDismissReceiver : BroadcastReceiver() {
 
 @AndroidEntryPoint
 class RoutineDoneReceiver : BroadcastReceiver() {
-
-    @Inject lateinit var taskRepository: TaskRepository
-
     override fun onReceive(context: Context, intent: Intent) {
         val taskId = intent.getLongExtra("task_id", -1L)
         val notificationId = intent.getIntExtra("notification_id", -1)
@@ -402,8 +392,7 @@ class RoutineDoneReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                taskRepository.logTask(taskId, null, null, null)
-                TaskWidgetUpdateService.refreshTask(context, taskId)
+                TaskWidgetUpdateService.recordCompletion(context, taskId)
             } finally {
                 if (notificationId != -1) {
                     val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
@@ -416,7 +405,7 @@ class RoutineDoneReceiver : BroadcastReceiver() {
 }
 
 // ─── Routine Snooze Receiver ─────────────────────────────────────────────────
-// Pauses reminders for the routine for 24h without deactivating it.
+// Pauses reminders briefly without deactivating the routine.
 
 @AndroidEntryPoint
 class RoutineSnoozeReceiver : BroadcastReceiver() {
@@ -430,7 +419,33 @@ class RoutineSnoozeReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                routineRepository.snoozeKeepActive(routineId, System.currentTimeMillis() + 24 * 3_600_000L)
+                routineRepository.snoozeKeepActive(routineId, System.currentTimeMillis() + 3_600_000L)
+            } finally {
+                if (notificationId != -1) {
+                    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    nm.cancel(notificationId)
+                }
+                pending.finish()
+            }
+        }
+    }
+}
+
+// ─── Routine "Skip today" Receiver ──────────────────────────────────────────
+
+@AndroidEntryPoint
+class RoutineSkipTodayReceiver : BroadcastReceiver() {
+
+    @Inject lateinit var routineRepository: RoutineRepository
+
+    override fun onReceive(context: Context, intent: Intent) {
+        val routineId = intent.getLongExtra("routine_id", -1L)
+        val notificationId = intent.getIntExtra("notification_id", -1)
+        if (routineId == -1L) return
+        val pending = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                routineRepository.snoozeKeepActive(routineId, RoutineReminderPolicy.nextMorning())
             } finally {
                 if (notificationId != -1) {
                     val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager

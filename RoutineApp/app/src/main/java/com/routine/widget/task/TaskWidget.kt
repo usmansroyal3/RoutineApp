@@ -28,12 +28,15 @@ import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import androidx.datastore.preferences.core.*
+import androidx.lifecycle.lifecycleScope
 import com.routine.data.repository.TaskRepository
+import com.routine.domain.PatternAnalyzer
+import com.routine.domain.RelativeTimeFormatter
 import com.routine.worker.PatternAnalysisWorker
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 // ─── Widget palette (day / night aware) ──────────────────────────────────────
@@ -81,7 +84,8 @@ class TaskWidget : GlanceAppWidget() {
         val prefs = currentState<androidx.datastore.preferences.core.Preferences>()
         val taskName = prefs[stringPreferencesKey("task_name")] ?: "Task"
         val emoji = prefs[stringPreferencesKey("task_emoji")] ?: "📌"
-        val lastDoneText = prefs[stringPreferencesKey("last_done")] ?: "Never"
+        val lastDoneAt = prefs[longPreferencesKey("last_done_at")]
+        val lastDoneText = RelativeTimeFormatter.format(lastDoneAt)
         val isOverdue = prefs[booleanPreferencesKey("is_overdue")] ?: false
 
         Box(
@@ -134,9 +138,7 @@ class TaskLogAction : ActionCallback {
         parameters: ActionParameters
     ) {
         val appWidgetId = GlanceAppWidgetManager(context).getAppWidgetId(glanceId)
-        CoroutineScope(Dispatchers.IO).launch {
-            TaskWidgetUpdateService.logAndUpdate(context, appWidgetId)
-        }
+        TaskWidgetUpdateService.logAndUpdate(context, appWidgetId)
     }
 }
 
@@ -168,18 +170,20 @@ class TaskWidgetConfigActivity : ComponentActivity() {
                 Surface {
                     TaskWidgetConfigScreen(
                         onConfirm = { name, emoji ->
-                            CoroutineScope(Dispatchers.IO).launch {
-                                val taskId = taskRepository.createTask(name, emoji)
-                                taskRepository.assignWidget(taskId, appWidgetId)
-                                TaskWidgetUpdateService.updateWidgetState(
-                                    this@TaskWidgetConfigActivity, appWidgetId, name, emoji, "Never", false
-                                )
+                            lifecycleScope.launch {
+                                withContext(Dispatchers.IO) {
+                                    val taskId = taskRepository.createTask(name, emoji)
+                                    taskRepository.assignWidget(taskId, appWidgetId)
+                                    TaskWidgetUpdateService.updateWidgetState(
+                                        this@TaskWidgetConfigActivity, appWidgetId, name, emoji, null, false
+                                    )
+                                }
+                                val result = Intent().apply {
+                                    putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
+                                }
+                                setResult(RESULT_OK, result)
+                                finish()
                             }
-                            val result = Intent().apply {
-                                putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
-                            }
-                            setResult(RESULT_OK, result)
-                            finish()
                         },
                         onCancel = { finish() }
                     )
@@ -220,7 +224,7 @@ fun TaskWidgetConfigScreen(onConfirm: (String, String) -> Unit, onCancel: () -> 
 
 @Composable
 fun FlowRow(emojis: List<String>, selected: String, onSelect: (String) -> Unit) {
-    Column {
+    androidx.compose.foundation.layout.Column {
         emojis.chunked(5).forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 row.forEach { emoji ->
@@ -246,16 +250,24 @@ object TaskWidgetUpdateService {
         val taskRepo = entryPoint.taskRepository()
         val task = taskRepo.getTaskByWidget(appWidgetId) ?: return
 
-        // Log the tap with current location (best-effort)
-        taskRepo.logTask(task.id, null, null, null)
+        recordCompletion(context, task.id)
+    }
 
-        // Trigger pattern analysis every 3 logs
-        val count = taskRepo.getLogCount(task.id)
-        if (count % 3 == 0) {
-            PatternAnalysisWorker.enqueue(context, task.id)
+    /** Records from widgets and notification actions through one consistent path. */
+    suspend fun recordCompletion(context: Context, taskId: Long) {
+        val entryPoint = com.routine.di.RepositoryEntryPoint.get(context)
+        val taskRepo = entryPoint.taskRepository()
+
+        // Log the tap with current location (best-effort)
+        taskRepo.logTask(taskId, null, null, null)
+
+        // Analyze after every eligible tap. Unique work coalesces rapid repeated taps.
+        val count = taskRepo.getLogCount(taskId)
+        if (count >= PatternAnalyzer.MIN_LOGS_FOR_ANALYSIS) {
+            PatternAnalysisWorker.enqueue(context, taskId)
         }
 
-        refreshTask(context, task.id)
+        refreshTask(context, taskId)
     }
 
     /** Recompute a task's display state and push it to its widget, if any. */
@@ -274,14 +286,7 @@ object TaskWidgetUpdateService {
             hoursSince > routine.intervalHours &&
             routine.status == com.routine.data.model.RoutineStatus.ACTIVE
 
-        val lastDoneText = when {
-            hoursSince == null -> "Never"
-            hoursSince < 1 -> "Just now"
-            hoursSince < 24 -> "${hoursSince}h ago"
-            else -> "${hoursSince / 24}d ago"
-        }
-
-        updateWidgetState(context, task.widgetId, task.name, task.emoji, lastDoneText, isOverdue)
+        updateWidgetState(context, task.widgetId, task.name, task.emoji, lastLog?.timestamp, isOverdue)
     }
 
     suspend fun updateWidgetState(
@@ -289,7 +294,7 @@ object TaskWidgetUpdateService {
         appWidgetId: Int,
         name: String,
         emoji: String,
-        lastDone: String,
+        lastDoneAt: Long?,
         isOverdue: Boolean
     ) {
         val manager = GlanceAppWidgetManager(context)
@@ -302,7 +307,11 @@ object TaskWidgetUpdateService {
             prefs.toMutablePreferences().apply {
                 this[stringPreferencesKey("task_name")] = name
                 this[stringPreferencesKey("task_emoji")] = emoji
-                this[stringPreferencesKey("last_done")] = lastDone
+                if (lastDoneAt == null) {
+                    remove(longPreferencesKey("last_done_at"))
+                } else {
+                    this[longPreferencesKey("last_done_at")] = lastDoneAt
+                }
                 this[booleanPreferencesKey("is_overdue")] = isOverdue
             }
         }
