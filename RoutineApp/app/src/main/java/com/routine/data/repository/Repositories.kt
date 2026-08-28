@@ -4,7 +4,6 @@ import com.routine.data.db.dao.*
 import com.routine.data.model.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.first
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -28,6 +27,9 @@ class TaskRepository @Inject constructor(
     suspend fun assignWidget(taskId: Long, widgetId: Int) =
         taskDao.assignWidget(taskId, widgetId)
 
+    suspend fun clearWidgetAssignments(widgetIds: IntArray) =
+        taskDao.clearWidgetAssignments(widgetIds)
+
     suspend fun deleteTask(task: Task) = taskDao.delete(task)
 
     suspend fun logTask(taskId: Long, lat: Double?, lng: Double?, locationLabel: String?): Long {
@@ -43,27 +45,22 @@ class TaskRepository @Inject constructor(
 
     suspend fun getLogCount(taskId: Long): Int = taskLogDao.getLogCount(taskId)
 
-    suspend fun getTasksWithState(): List<TaskWithLastLog> {
-        val tasks = taskDao.observeAll().first()
-        return tasks.map { task ->
-            TaskWithLastLog(
-                task = task,
-                lastLog = taskLogDao.getLastLog(task.id),
-                routine = routineDao.getForTask(task.id)
-            )
-        }
-    }
-
     fun observeTasksWithState(): Flow<List<TaskWithLastLog>> {
         return combine(
             taskDao.observeAll(),
+            taskLogDao.observeAll(),
             routineDao.observeAll()
-        ) { tasks, _ ->
+        ) { tasks, logs, routines ->
+            val latestLogByTask = logs.groupBy(TaskLog::taskId)
+                .mapValues { (_, taskLogs) -> taskLogs.maxByOrNull(TaskLog::timestamp) }
+            val latestRoutineByTask = routines.groupBy(Routine::taskId)
+                .mapValues { (_, taskRoutines) -> taskRoutines.maxByOrNull(Routine::createdAt) }
+
             tasks.map { task ->
                 TaskWithLastLog(
                     task = task,
-                    lastLog = taskLogDao.getLastLog(task.id),
-                    routine = routineDao.getForTask(task.id)
+                    lastLog = latestLogByTask[task.id],
+                    routine = latestRoutineByTask[task.id]
                 )
             }
         }

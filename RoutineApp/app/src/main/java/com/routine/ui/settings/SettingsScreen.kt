@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.routine.BuildConfig
 import com.routine.data.repository.SettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.SharingStarted
@@ -136,7 +137,7 @@ fun SettingsScreen(vm: SettingsViewModel = hiltViewModel()) {
             }
 
             Text(
-                "RoutineApp v1.0 — built for forgetful humans 🌱",
+                "RoutineApp v${BuildConfig.VERSION_NAME} — built for forgetful humans 🌱",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.4f)
             )

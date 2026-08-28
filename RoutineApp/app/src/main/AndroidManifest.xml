@@ -17,9 +17,9 @@
     <application
         android:name=".RoutineApp"
         android:allowBackup="true"
-        android:icon="@mipmap/ic_launcher"
+        android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"
-        android:roundIcon="@mipmap/ic_launcher_round"
+        android:roundIcon="@drawable/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.RoutineApp">
 
@@ -85,6 +85,9 @@
         <receiver
             android:name=".worker.RoutineSnoozeReceiver"
             android:exported="false" />
+        <receiver
+            android:name=".worker.RoutineSkipTodayReceiver"
+            android:exported="false" />
 
         <!-- Geofence Broadcast Receiver -->
         <receiver
@@ -100,7 +103,7 @@
             tools:node="merge">
             <meta-data
                 android:name="androidx.work.WorkManagerInitializer"
-                android:value="androidx.startup" />
+                tools:node="remove" />
         </provider>
 
         <!-- Notification Channels defined at runtime in RoutineApp.kt -->

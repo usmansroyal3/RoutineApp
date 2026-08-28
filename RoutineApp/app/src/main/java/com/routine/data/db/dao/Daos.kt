@@ -28,6 +28,9 @@ interface TaskDao {
 
     @Query("UPDATE tasks SET widgetId = :widgetId WHERE id = :taskId")
     suspend fun assignWidget(taskId: Long, widgetId: Int)
+
+    @Query("UPDATE tasks SET widgetId = -1 WHERE widgetId IN (:widgetIds)")
+    suspend fun clearWidgetAssignments(widgetIds: IntArray)
 }
 
 // ─── TaskLogDao ───────────────────────────────────────────────────────────────
@@ -49,8 +52,11 @@ interface TaskLogDao {
     @Query("SELECT COUNT(*) FROM task_logs WHERE taskId = :taskId")
     suspend fun getLogCount(taskId: Long): Int
 
-    @Query("SELECT * FROM task_logs ORDER BY timestamp DESC LIMIT 1")
+    @Query("SELECT * FROM task_logs WHERE taskId = :taskId ORDER BY timestamp DESC LIMIT 1")
     fun observeLastLog(taskId: Long): Flow<TaskLog?>
+
+    @Query("SELECT * FROM task_logs ORDER BY timestamp DESC")
+    fun observeAll(): Flow<List<TaskLog>>
 }
 
 // ─── RoutineDao ───────────────────────────────────────────────────────────────

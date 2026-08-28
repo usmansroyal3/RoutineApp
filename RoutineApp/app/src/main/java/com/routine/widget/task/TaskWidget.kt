@@ -7,6 +7,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -25,15 +27,21 @@ import androidx.glance.layout.Alignment
 import androidx.glance.state.GlanceStateDefinition
 import androidx.glance.state.PreferencesGlanceStateDefinition
 import androidx.glance.text.FontWeight
-import androidx.glance.text.Text
+import androidx.glance.text.Text as GlanceText
 import androidx.glance.text.TextStyle
 import androidx.datastore.preferences.core.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import com.routine.data.model.Task
 import com.routine.data.repository.TaskRepository
+import com.routine.domain.PatternAnalyzer
+import com.routine.domain.RelativeTimeFormatter
 import com.routine.worker.PatternAnalysisWorker
 import dagger.hilt.android.AndroidEntryPoint
-import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import javax.inject.Inject
 
 // ─── Widget palette (day / night aware) ──────────────────────────────────────
@@ -65,6 +73,20 @@ private object WidgetPalette {
 
 class TaskWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget = TaskWidget()
+
+    override fun onDeleted(context: Context, appWidgetIds: IntArray) {
+        super.onDeleted(context, appWidgetIds)
+        val pendingResult = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                com.routine.di.RepositoryEntryPoint.get(context)
+                    .taskRepository()
+                    .clearWidgetAssignments(appWidgetIds)
+            } finally {
+                pendingResult.finish()
+            }
+        }
+    }
 }
 
 class TaskWidget : GlanceAppWidget() {
@@ -81,7 +103,8 @@ class TaskWidget : GlanceAppWidget() {
         val prefs = currentState<androidx.datastore.preferences.core.Preferences>()
         val taskName = prefs[stringPreferencesKey("task_name")] ?: "Task"
         val emoji = prefs[stringPreferencesKey("task_emoji")] ?: "📌"
-        val lastDoneText = prefs[stringPreferencesKey("last_done")] ?: "Never"
+        val lastDoneAt = prefs[longPreferencesKey("last_done_at")]
+        val lastDoneText = RelativeTimeFormatter.format(lastDoneAt)
         val isOverdue = prefs[booleanPreferencesKey("is_overdue")] ?: false
 
         Box(
@@ -97,12 +120,12 @@ class TaskWidget : GlanceAppWidget() {
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
+                GlanceText(
                     text = emoji,
                     style = TextStyle(fontSize = 26.sp)
                 )
                 Spacer(modifier = GlanceModifier.height(4.dp))
-                Text(
+                GlanceText(
                     text = taskName,
                     style = TextStyle(
                         fontSize = 14.sp,
@@ -112,7 +135,7 @@ class TaskWidget : GlanceAppWidget() {
                     maxLines = 1
                 )
                 Spacer(modifier = GlanceModifier.height(2.dp))
-                Text(
+                GlanceText(
                     text = if (isOverdue) "● due · $lastDoneText" else "✓ $lastDoneText",
                     style = TextStyle(
                         fontSize = 11.sp,
@@ -134,9 +157,7 @@ class TaskLogAction : ActionCallback {
         parameters: ActionParameters
     ) {
         val appWidgetId = GlanceAppWidgetManager(context).getAppWidgetId(glanceId)
-        CoroutineScope(Dispatchers.IO).launch {
-            TaskWidgetUpdateService.logAndUpdate(context, appWidgetId)
-        }
+        TaskWidgetUpdateService.logAndUpdate(context, appWidgetId)
     }
 }
 
@@ -166,20 +187,20 @@ class TaskWidgetConfigActivity : ComponentActivity() {
         setContent {
             com.routine.ui.theme.AppTheme {
                 Surface {
+                    val tasks by taskRepository.observeAllTasks()
+                        .collectAsStateWithLifecycle(initialValue = emptyList())
                     TaskWidgetConfigScreen(
-                        onConfirm = { name, emoji ->
-                            CoroutineScope(Dispatchers.IO).launch {
-                                val taskId = taskRepository.createTask(name, emoji)
-                                taskRepository.assignWidget(taskId, appWidgetId)
-                                TaskWidgetUpdateService.updateWidgetState(
-                                    this@TaskWidgetConfigActivity, appWidgetId, name, emoji, "Never", false
-                                )
+                        tasks = tasks.filter { it.widgetId == -1 || it.widgetId == appWidgetId },
+                        onChooseTask = { task ->
+                            finishConfiguration(task.id, task.name, task.emoji)
+                        },
+                        onCreateTask = { name, emoji ->
+                            lifecycleScope.launch {
+                                val taskId = withContext(Dispatchers.IO) {
+                                    taskRepository.createTask(name.trim(), emoji)
+                                }
+                                finishConfiguration(taskId, name.trim(), emoji)
                             }
-                            val result = Intent().apply {
-                                putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
-                            }
-                            setResult(RESULT_OK, result)
-                            finish()
                         },
                         onCancel = { finish() }
                     )
@@ -187,40 +208,103 @@ class TaskWidgetConfigActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun finishConfiguration(taskId: Long, name: String, emoji: String) {
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                taskRepository.assignWidget(taskId, appWidgetId)
+                TaskWidgetUpdateService.updateWidgetState(
+                    this@TaskWidgetConfigActivity,
+                    appWidgetId,
+                    name,
+                    emoji,
+                    taskRepository.getLastLog(taskId)?.timestamp,
+                    false
+                )
+            }
+            setResult(RESULT_OK, Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId))
+            finish()
+        }
+    }
 }
 
 @Composable
-fun TaskWidgetConfigScreen(onConfirm: (String, String) -> Unit, onCancel: () -> Unit) {
+fun TaskWidgetConfigScreen(
+    tasks: List<Task>,
+    onChooseTask: (Task) -> Unit,
+    onCreateTask: (String, String) -> Unit,
+    onCancel: () -> Unit
+) {
     val emojis = listOf("🌱", "💊", "🏃", "💧", "📚", "🧹", "🐕", "🪴", "☕", "🧘")
     var taskName by remember { mutableStateOf("") }
     var selectedEmoji by remember { mutableStateOf("🌱") }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(24.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Create Task Widget", style = MaterialTheme.typography.headlineSmall)
-        OutlinedTextField(
-            value = taskName,
-            onValueChange = { taskName = it },
-            label = { Text("Task name") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        Text("Pick an emoji", style = MaterialTheme.typography.labelLarge)
-        FlowRow(emojis, selectedEmoji) { selectedEmoji = it }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) { Text("Cancel") }
-            Button(
-                onClick = { if (taskName.isNotBlank()) onConfirm(taskName, selectedEmoji) },
-                modifier = Modifier.weight(1f)
-            ) { Text("Create") }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Add a task widget", style = MaterialTheme.typography.headlineSmall)
+                Text(
+                    "Choose what this widget should track. One tap will record a completion.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        if (tasks.isNotEmpty()) {
+            item { Text("Choose an existing task", style = MaterialTheme.typography.titleSmall) }
+            items(tasks, key = { it.id }) { task ->
+                Card(
+                    onClick = { onChooseTask(task) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Text(task.emoji, fontSize = 24.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(task.name, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                        Text("Choose", color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+            item { HorizontalDivider() }
+        }
+
+        item { Text("Create a new task", style = MaterialTheme.typography.titleSmall) }
+        item {
+            OutlinedTextField(
+                value = taskName,
+                onValueChange = { if (it.length <= 60) taskName = it },
+                label = { Text("Task name") },
+                placeholder = { Text("Water plants") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        item { Text("Choose an icon", style = MaterialTheme.typography.labelLarge) }
+        item { FlowRow(emojis, selectedEmoji) { selectedEmoji = it } }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) { Text("Cancel") }
+                Button(
+                    enabled = taskName.isNotBlank(),
+                    onClick = { onCreateTask(taskName.trim(), selectedEmoji) },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Create widget") }
+            }
         }
     }
 }
 
 @Composable
 fun FlowRow(emojis: List<String>, selected: String, onSelect: (String) -> Unit) {
-    Column {
+    androidx.compose.foundation.layout.Column {
         emojis.chunked(5).forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 row.forEach { emoji ->
@@ -246,16 +330,24 @@ object TaskWidgetUpdateService {
         val taskRepo = entryPoint.taskRepository()
         val task = taskRepo.getTaskByWidget(appWidgetId) ?: return
 
-        // Log the tap with current location (best-effort)
-        taskRepo.logTask(task.id, null, null, null)
+        recordCompletion(context, task.id)
+    }
 
-        // Trigger pattern analysis every 3 logs
-        val count = taskRepo.getLogCount(task.id)
-        if (count % 3 == 0) {
-            PatternAnalysisWorker.enqueue(context, task.id)
+    /** Records from widgets and notification actions through one consistent path. */
+    suspend fun recordCompletion(context: Context, taskId: Long) {
+        val entryPoint = com.routine.di.RepositoryEntryPoint.get(context)
+        val taskRepo = entryPoint.taskRepository()
+
+        // Log the tap with current location (best-effort)
+        taskRepo.logTask(taskId, null, null, null)
+
+        // Analyze after every eligible tap. Unique work coalesces rapid repeated taps.
+        val count = taskRepo.getLogCount(taskId)
+        if (count >= PatternAnalyzer.MIN_LOGS_FOR_ANALYSIS) {
+            PatternAnalysisWorker.enqueue(context, taskId)
         }
 
-        refreshTask(context, task.id)
+        refreshTask(context, taskId)
     }
 
     /** Recompute a task's display state and push it to its widget, if any. */
@@ -274,14 +366,7 @@ object TaskWidgetUpdateService {
             hoursSince > routine.intervalHours &&
             routine.status == com.routine.data.model.RoutineStatus.ACTIVE
 
-        val lastDoneText = when {
-            hoursSince == null -> "Never"
-            hoursSince < 1 -> "Just now"
-            hoursSince < 24 -> "${hoursSince}h ago"
-            else -> "${hoursSince / 24}d ago"
-        }
-
-        updateWidgetState(context, task.widgetId, task.name, task.emoji, lastDoneText, isOverdue)
+        updateWidgetState(context, task.widgetId, task.name, task.emoji, lastLog?.timestamp, isOverdue)
     }
 
     suspend fun updateWidgetState(
@@ -289,12 +374,11 @@ object TaskWidgetUpdateService {
         appWidgetId: Int,
         name: String,
         emoji: String,
-        lastDone: String,
+        lastDoneAt: Long?,
         isOverdue: Boolean
     ) {
         val manager = GlanceAppWidgetManager(context)
-        val glanceId = manager
-            .getGlanceIds(TaskWidget::class.java)
+        val glanceId = manager.getGlanceIds(TaskWidget::class.java)
             .firstOrNull { manager.getAppWidgetId(it) == appWidgetId }
             ?: return
 
@@ -302,7 +386,11 @@ object TaskWidgetUpdateService {
             prefs.toMutablePreferences().apply {
                 this[stringPreferencesKey("task_name")] = name
                 this[stringPreferencesKey("task_emoji")] = emoji
-                this[stringPreferencesKey("last_done")] = lastDone
+                if (lastDoneAt == null) {
+                    remove(longPreferencesKey("last_done_at"))
+                } else {
+                    this[longPreferencesKey("last_done_at")] = lastDoneAt
+                }
                 this[booleanPreferencesKey("is_overdue")] = isOverdue
             }
         }
