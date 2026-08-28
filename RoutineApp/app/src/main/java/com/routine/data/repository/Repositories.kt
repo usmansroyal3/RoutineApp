@@ -27,6 +27,9 @@ class TaskRepository @Inject constructor(
     suspend fun assignWidget(taskId: Long, widgetId: Int) =
         taskDao.assignWidget(taskId, widgetId)
 
+    suspend fun clearWidgetAssignments(widgetIds: IntArray) =
+        taskDao.clearWidgetAssignments(widgetIds)
+
     suspend fun deleteTask(task: Task) = taskDao.delete(task)
 
     suspend fun logTask(taskId: Long, lat: Double?, lng: Double?, locationLabel: String?): Long {

@@ -7,6 +7,8 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -25,16 +27,19 @@ import androidx.glance.layout.Alignment
 import androidx.glance.state.GlanceStateDefinition
 import androidx.glance.state.PreferencesGlanceStateDefinition
 import androidx.glance.text.FontWeight
-import androidx.glance.text.Text
+import androidx.glance.text.Text as GlanceText
 import androidx.glance.text.TextStyle
 import androidx.datastore.preferences.core.*
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import com.routine.data.model.Task
 import com.routine.data.repository.TaskRepository
 import com.routine.domain.PatternAnalyzer
 import com.routine.domain.RelativeTimeFormatter
 import com.routine.worker.PatternAnalysisWorker
 import dagger.hilt.android.AndroidEntryPoint
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import javax.inject.Inject
@@ -68,6 +73,20 @@ private object WidgetPalette {
 
 class TaskWidgetReceiver : GlanceAppWidgetReceiver() {
     override val glanceAppWidget = TaskWidget()
+
+    override fun onDeleted(context: Context, appWidgetIds: IntArray) {
+        super.onDeleted(context, appWidgetIds)
+        val pendingResult = goAsync()
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                com.routine.di.RepositoryEntryPoint.get(context)
+                    .taskRepository()
+                    .clearWidgetAssignments(appWidgetIds)
+            } finally {
+                pendingResult.finish()
+            }
+        }
+    }
 }
 
 class TaskWidget : GlanceAppWidget() {
@@ -101,12 +120,12 @@ class TaskWidget : GlanceAppWidget() {
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Text(
+                GlanceText(
                     text = emoji,
                     style = TextStyle(fontSize = 26.sp)
                 )
                 Spacer(modifier = GlanceModifier.height(4.dp))
-                Text(
+                GlanceText(
                     text = taskName,
                     style = TextStyle(
                         fontSize = 14.sp,
@@ -116,7 +135,7 @@ class TaskWidget : GlanceAppWidget() {
                     maxLines = 1
                 )
                 Spacer(modifier = GlanceModifier.height(2.dp))
-                Text(
+                GlanceText(
                     text = if (isOverdue) "● due · $lastDoneText" else "✓ $lastDoneText",
                     style = TextStyle(
                         fontSize = 11.sp,
@@ -168,21 +187,19 @@ class TaskWidgetConfigActivity : ComponentActivity() {
         setContent {
             com.routine.ui.theme.AppTheme {
                 Surface {
+                    val tasks by taskRepository.observeAllTasks()
+                        .collectAsStateWithLifecycle(initialValue = emptyList())
                     TaskWidgetConfigScreen(
-                        onConfirm = { name, emoji ->
+                        tasks = tasks.filter { it.widgetId == -1 || it.widgetId == appWidgetId },
+                        onChooseTask = { task ->
+                            finishConfiguration(task.id, task.name, task.emoji)
+                        },
+                        onCreateTask = { name, emoji ->
                             lifecycleScope.launch {
-                                withContext(Dispatchers.IO) {
-                                    val taskId = taskRepository.createTask(name, emoji)
-                                    taskRepository.assignWidget(taskId, appWidgetId)
-                                    TaskWidgetUpdateService.updateWidgetState(
-                                        this@TaskWidgetConfigActivity, appWidgetId, name, emoji, null, false
-                                    )
+                                val taskId = withContext(Dispatchers.IO) {
+                                    taskRepository.createTask(name.trim(), emoji)
                                 }
-                                val result = Intent().apply {
-                                    putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId)
-                                }
-                                setResult(RESULT_OK, result)
-                                finish()
+                                finishConfiguration(taskId, name.trim(), emoji)
                             }
                         },
                         onCancel = { finish() }
@@ -191,33 +208,96 @@ class TaskWidgetConfigActivity : ComponentActivity() {
             }
         }
     }
+
+    private fun finishConfiguration(taskId: Long, name: String, emoji: String) {
+        lifecycleScope.launch {
+            withContext(Dispatchers.IO) {
+                taskRepository.assignWidget(taskId, appWidgetId)
+                TaskWidgetUpdateService.updateWidgetState(
+                    this@TaskWidgetConfigActivity,
+                    appWidgetId,
+                    name,
+                    emoji,
+                    taskRepository.getLastLog(taskId)?.timestamp,
+                    false
+                )
+            }
+            setResult(RESULT_OK, Intent().putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, appWidgetId))
+            finish()
+        }
+    }
 }
 
 @Composable
-fun TaskWidgetConfigScreen(onConfirm: (String, String) -> Unit, onCancel: () -> Unit) {
+fun TaskWidgetConfigScreen(
+    tasks: List<Task>,
+    onChooseTask: (Task) -> Unit,
+    onCreateTask: (String, String) -> Unit,
+    onCancel: () -> Unit
+) {
     val emojis = listOf("🌱", "💊", "🏃", "💧", "📚", "🧹", "🐕", "🪴", "☕", "🧘")
     var taskName by remember { mutableStateOf("") }
     var selectedEmoji by remember { mutableStateOf("🌱") }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(24.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(24.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
-        Text("Create Task Widget", style = MaterialTheme.typography.headlineSmall)
-        OutlinedTextField(
-            value = taskName,
-            onValueChange = { taskName = it },
-            label = { Text("Task name") },
-            modifier = Modifier.fillMaxWidth()
-        )
-        Text("Pick an emoji", style = MaterialTheme.typography.labelLarge)
-        FlowRow(emojis, selectedEmoji) { selectedEmoji = it }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) { Text("Cancel") }
-            Button(
-                onClick = { if (taskName.isNotBlank()) onConfirm(taskName, selectedEmoji) },
-                modifier = Modifier.weight(1f)
-            ) { Text("Create") }
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("Add a task widget", style = MaterialTheme.typography.headlineSmall)
+                Text(
+                    "Choose what this widget should track. One tap will record a completion.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        if (tasks.isNotEmpty()) {
+            item { Text("Choose an existing task", style = MaterialTheme.typography.titleSmall) }
+            items(tasks, key = { it.id }) { task ->
+                Card(
+                    onClick = { onChooseTask(task) },
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(20.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        Text(task.emoji, fontSize = 24.sp)
+                        Spacer(Modifier.width(12.dp))
+                        Text(task.name, modifier = Modifier.weight(1f), style = MaterialTheme.typography.titleMedium)
+                        Text("Choose", color = MaterialTheme.colorScheme.primary)
+                    }
+                }
+            }
+            item { HorizontalDivider() }
+        }
+
+        item { Text("Create a new task", style = MaterialTheme.typography.titleSmall) }
+        item {
+            OutlinedTextField(
+                value = taskName,
+                onValueChange = { if (it.length <= 60) taskName = it },
+                label = { Text("Task name") },
+                placeholder = { Text("Water plants") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        item { Text("Choose an icon", style = MaterialTheme.typography.labelLarge) }
+        item { FlowRow(emojis, selectedEmoji) { selectedEmoji = it } }
+        item {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedButton(onClick = onCancel, modifier = Modifier.weight(1f)) { Text("Cancel") }
+                Button(
+                    enabled = taskName.isNotBlank(),
+                    onClick = { onCreateTask(taskName.trim(), selectedEmoji) },
+                    modifier = Modifier.weight(1f)
+                ) { Text("Create widget") }
+            }
         }
     }
 }
@@ -298,8 +378,7 @@ object TaskWidgetUpdateService {
         isOverdue: Boolean
     ) {
         val manager = GlanceAppWidgetManager(context)
-        val glanceId = manager
-            .getGlanceIds(TaskWidget::class.java)
+        val glanceId = manager.getGlanceIds(TaskWidget::class.java)
             .firstOrNull { manager.getAppWidgetId(it) == appWidgetId }
             ?: return
 

@@ -28,6 +28,9 @@ interface TaskDao {
 
     @Query("UPDATE tasks SET widgetId = :widgetId WHERE id = :taskId")
     suspend fun assignWidget(taskId: Long, widgetId: Int)
+
+    @Query("UPDATE tasks SET widgetId = -1 WHERE widgetId IN (:widgetIds)")
+    suspend fun clearWidgetAssignments(widgetIds: IntArray)
 }
 
 // ─── TaskLogDao ───────────────────────────────────────────────────────────────
